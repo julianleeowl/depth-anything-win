@@ -181,7 +181,8 @@ class DepthAnythingV2(nn.Module):
         depth = self.depth_head(features, patch_h, patch_w)
         depth = F.relu(depth)
         
-        return depth.squeeze(1)
+        #return depth.squeeze(1)
+        return depth
     
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518):
@@ -189,7 +190,8 @@ class DepthAnythingV2(nn.Module):
         
         depth = self.forward(image)
         
-        depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
+        # depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
+        depth = F.interpolate(depth, (h, w), mode="bilinear", align_corners=True)[0, 0]
         
         return depth.cpu().numpy()
     
