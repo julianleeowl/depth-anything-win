@@ -1,0 +1,8 @@
+*.pyc
+*.pth
+*.onnx
+*.png
+*.engine
+*.data
+*.safetensors
+.vscode
