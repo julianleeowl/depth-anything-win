@@ -13,6 +13,7 @@ def main():
     
     parser.add_argument('--input-size', type=int, default=518)
     parser.add_argument('--encoder', type=str, default='vits', choices=['vits', 'vitb', 'vitl', 'vitg'])
+    parser.add_argument('--suffix', type=str, default='')
 
     args = parser.parse_args()
     
@@ -43,7 +44,8 @@ def main():
     example_output = depth_anything.forward(dummy_input)
 
     # Define ONNX export path
-    onnx_path = f'depth_anything_v2_{args.encoder}_{args.input_size}.onnx'
+    # onnx_path = f'depth_anything_v2_{args.encoder}_{args.input_size}.onnx'
+    onnx_path = f'distill_any_depth_multi_teacher_small_{args.encoder}_{args.input_size}_{args.suffix}.onnx'
 
     # Export the PyTorch model to ONNX format
     torch.onnx.export(
