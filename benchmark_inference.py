@@ -17,11 +17,11 @@ Usage:
 """
 
 import argparse
-import time
-from contextlib import contextmanager
 
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-import torch.nn as nn
 
 # Check for Flash Attention availability
 FLASH_ATTN_AVAILABLE = False
@@ -65,27 +65,44 @@ MODEL_CONFIGS = {
 
 
 # =============================================================================
-# TIMING UTILITIES
+# IMAGE LOADING
 # =============================================================================
 
-@contextmanager
-def cuda_timer():
-    """Context manager for accurate CUDA timing."""
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+def load_image(image_path: str, input_size: int = 518):
+    """Load and preprocess image for Depth Anything V2.
+    Returns (tensor, original_image_for_display).
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Cannot load image: {image_path}")
 
-    torch.cuda.synchronize()
-    start.record()
+    # Convert BGR -> RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    yield
+    # Resize to fixed size (must be multiple of 14 for ViT)
+    target_size = (input_size // 14) * 14
+    img_resized = cv2.resize(img_rgb, (target_size, target_size))
 
-    end.record()
-    torch.cuda.synchronize()
+    # Keep original for display
+    original_display = img_resized.copy()
 
-    # Return time in milliseconds
-    elapsed = start.elapsed_time(end)
-    yield elapsed
+    # Normalize to [0, 1]
+    img_norm = img_resized / 255.0
 
+    # ImageNet normalization
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+    img_norm = (img_norm - mean) / std
+
+    # HWC -> CHW, add batch dim
+    tensor = torch.from_numpy(img_norm.transpose(2, 0, 1)).float().unsqueeze(0)
+
+    return tensor, original_display
+
+
+# =============================================================================
+# TIMING UTILITIES
+# =============================================================================
 
 def benchmark_model(model, input_tensor, warmup=10, iterations=100, name="Model"):
     """
@@ -131,6 +148,14 @@ def benchmark_model(model, input_tensor, warmup=10, iterations=100, name="Model"
     print(f"    Max:  {max_latency:.2f} ms")
     print(f"    FPS:  {1000/mean_latency:.1f}")
 
+    # Get output for visualization
+    with torch.no_grad():
+        output = model(input_tensor)
+        if isinstance(output, torch.Tensor):
+            depth_output = output.cpu().numpy()
+        else:
+            depth_output = np.array(output)
+
     return {
         "name": name,
         "mean_ms": mean_latency,
@@ -138,6 +163,7 @@ def benchmark_model(model, input_tensor, warmup=10, iterations=100, name="Model"
         "min_ms": min_latency,
         "max_ms": max_latency,
         "fps": 1000 / mean_latency,
+        "depth": depth_output,
     }
 
 
@@ -264,6 +290,7 @@ class TensorRTInference:
 def main():
     parser = argparse.ArgumentParser(description="Benchmark Inference Methods")
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--image", type=str, default=None, help="Path to input image")
     parser.add_argument("--encoder", type=str, default="vits", choices=["vits", "vitb", "vitl"])
     parser.add_argument("--input-size", type=int, default=518)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -274,9 +301,16 @@ def main():
 
     device = "cuda"
 
-    # Create input tensor
-    input_size = (args.input_size // 14) * 14  # Must be multiple of 14
-    input_tensor = torch.randn(args.batch_size, 3, input_size, input_size).to(device).half()
+    # Create input tensor from image or random
+    original_image = None
+    if args.image:
+        print(f"Loading image: {args.image}")
+        input_tensor, original_image = load_image(args.image, args.input_size)
+        input_tensor = input_tensor.to(device).half()
+    else:
+        print("Using random input tensor")
+        input_size = (args.input_size // 14) * 14  # Must be multiple of 14
+        input_tensor = torch.randn(args.batch_size, 3, input_size, input_size).to(device).half()
 
     print("=" * 60)
     print("INFERENCE BENCHMARK")
@@ -398,6 +432,42 @@ def main():
     print("  - First torch.compile run includes compilation time")
     print("  - Flash Attention requires: pip install flash-attn --no-build-isolation")
     print("  - xFormers alternative: pip install xformers")
+
+    # =========================================================================
+    # Plot Results
+    # =========================================================================
+    if results and original_image is not None:
+        print("\nGenerating comparison plot...")
+
+        n_plots = len(results) + 1  # +1 for original image
+        fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
+
+        # Plot original image
+        axes[0].imshow(original_image)
+        axes[0].set_title("Original Image", fontsize=10)
+        axes[0].axis("off")
+
+        # Plot each inference result
+        for i, r in enumerate(results):
+            depth = r["depth"]
+            # Handle different output shapes
+            if depth.ndim == 4:
+                depth = depth[0, 0]
+            elif depth.ndim == 3:
+                depth = depth[0]
+
+            # Normalize for display
+            depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+
+            axes[i + 1].imshow(depth_norm, cmap="magma")
+            axes[i + 1].set_title(f"{r['name']}\n{r['mean_ms']:.2f}ms | {r['fps']:.0f}FPS", fontsize=9)
+            axes[i + 1].axis("off")
+
+        plt.suptitle("Depth Estimation: Inference Method Comparison", fontsize=12, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig("benchmark_results.png", dpi=150, bbox_inches="tight")
+        print("Saved plot to: benchmark_results.png")
+        plt.show()
 
 
 if __name__ == "__main__":
