@@ -264,11 +264,14 @@ def run_engine_inference(engine_path: str, bgr: np.ndarray, input_size: int,
         context = engine.create_execution_context()
 
         h0, w0 = bgr.shape[:2]
+        # print(f"[INFO] Input image size: {w0}x{h0}")
 
         # Get input dtype from engine
         inputs, _ = get_io_tensors(engine)
         _, in_dtype = inputs[0]
         inp = preprocess_bgr_to_nchw(bgr, input_size, dtype=in_dtype)
+
+        print(f"[INFO] Inference input size: {inp.shape[3]}x{inp.shape[2]} (WxH)")
 
         # Warmup (also allocates buffers)
         io_buffers = None
