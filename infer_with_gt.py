@@ -19,7 +19,7 @@ import torch
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, align_scale_shift, eval_depth_metrics
+from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, align_scale_shift, eval_depth_metrics, depth_metric
 
 
 def load_engine(engine_path: str, logger: trt.ILogger) -> trt.ICudaEngine:
@@ -155,6 +155,11 @@ def main():
                         help="Model input size (default: 518)")
     parser.add_argument("--output", type=str, default="inference_result.png",
                         help="Output plot path (default: inference_result.png)")
+    parser.add_argument("--min-depth", type=float, default=1e-5, 
+                        help="Minimum valid depth for metrics (default: 1e-5)")
+    parser.add_argument("--max-depth", type=float, default=1e5, 
+                        help="Maximum valid depth for metrics (default: 1e5)")
+
     args = parser.parse_args()
 
     if not os.path.isfile(args.engine):
@@ -182,8 +187,8 @@ def main():
     gt_raw = np.load(args.gt).astype(np.float32)
     if gt_raw.ndim == 3:
         gt_raw = gt_raw.squeeze()
-    # gt_raw = cv2.resize(gt_raw, (w0, h0), interpolation=cv2.INTER_CUBIC)
     print(f"GT shape: {gt_raw.shape}  range=[{gt_raw.min():.3f}, {gt_raw.max():.3f}]")
+    # import ipdb; ipdb.set_trace()
 
     trt_logger = trt.Logger(trt.Logger.WARNING)
     print(f"Loading engine: {args.engine} ...")
@@ -203,27 +208,11 @@ def main():
 
     inv_depth_hw = squeeze_depth_to_hw(out_arr, out_name)
 
-    min_depth = 1e-5
-    max_depth = 1e5
-
-    depth_hw = 1.0 / inv_depth_hw
-    depth_resized = cv2.resize(depth_hw, (w0, h0), interpolation=cv2.INTER_LINEAR)
-
-
-    gt_mask = (gt_raw > min_depth) & (gt_raw < max_depth)
-
-    gt_valid = gt_raw[gt_mask]
-    depth_valid = depth_resized[gt_mask]
-
-    align_depth_resized, s, t = align_scale_shift(depth_valid, gt_valid)
-    metrics = eval_depth_metrics(torch.tensor(align_depth_resized), torch.tensor(gt_valid))
-
+    metrics, pred_norm, gt_norm = depth_metric(inv_depth_hw, gt_raw, args.min_depth, args.max_depth)
 
     for key, val in metrics.items():
         print(f"  {key}: {val:.6f}")
 
-    gt_norm = normalize_depth(gt_raw)
-    pred_norm = normalize_depth(depth_resized * s + t)
     plot_comparison(rgb, pred_norm, gt_norm, metrics, args.output)
     print(f"\nSaved comparison plot: {args.output}")
 
