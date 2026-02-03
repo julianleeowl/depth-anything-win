@@ -13,6 +13,7 @@ Outputs 3 separate PNG files + a stdout summary table.
 """
 
 import argparse
+import gc
 import os
 import time
 from threading import Thread, Condition
@@ -22,6 +23,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pynvml
 import tensorrt as trt
+from tqdm import tqdm
 
 import pycuda.driver as cuda
 import pycuda.autoinit
@@ -182,6 +184,16 @@ def squeeze_depth_to_hw(out: np.ndarray, name: str) -> np.ndarray:
     return depth2d.astype(np.float32)
 
 
+def _free_io_buffers(io_buffers):
+    """Free all CUDA device and page-locked host memory in io_buffers."""
+    (in_name, host_in, dev_in, in_shape), \
+        (host_outs, dev_outs, out_meta), stream = io_buffers
+    dev_in.free()
+    for dev_out in dev_outs:
+        dev_out.free()
+    del host_in, host_outs
+
+
 # =============================================================================
 # GPU monitoring via pynvml
 # =============================================================================
@@ -208,6 +220,7 @@ class GPUUtilSampler:
         self._cond = Condition()
         self._done = False
         self._thread = Thread(target=self._run, daemon=True)
+        self._t0: float = 0.0
         # Collected samples
         self.timestamps: list[float] = []
         self.gpu_util_pct: list[int] = []
@@ -227,6 +240,21 @@ class GPUUtilSampler:
             self._cond.notify()
         self._thread.join()
 
+    def reset(self):
+        """Clear collected samples and re-zero the clock.
+
+        Call while the sampler is running (e.g. after warmup) to discard
+        early samples and restart timestamps from zero.
+        """
+        with self._cond:
+            self.timestamps.clear()
+            self.gpu_util_pct.clear()
+            self.mem_util_pct.clear()
+            self.vram_used_mb.clear()
+            self.sm_clock_mhz.clear()
+            self.mem_clock_mhz.clear()
+            self._t0 = time.monotonic()
+
     def __enter__(self):
         self.start()
         return self
@@ -238,7 +266,7 @@ class GPUUtilSampler:
     def _run(self):
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_id)
-        t0 = time.monotonic()
+        self._t0 = time.monotonic()
         with self._cond:
             while not self._done:
                 try:
@@ -249,7 +277,7 @@ class GPUUtilSampler:
                     mem_clk = pynvml.nvmlDeviceGetClockInfo(
                         handle, pynvml.NVML_CLOCK_MEM)
 
-                    self.timestamps.append(time.monotonic() - t0)
+                    self.timestamps.append(time.monotonic() - self._t0)
                     self.gpu_util_pct.append(util.gpu)
                     self.mem_util_pct.append(util.memory)
                     self.vram_used_mb.append(mem_info.used / (1024 ** 2))
@@ -625,7 +653,7 @@ def main():
                              "images in --metric-images-dir (by basename)")
     parser.add_argument("--input-size", type=int, default=518,
                         help="Model input size (default: 518)")
-    parser.add_argument("--warmup", type=int, default=50,
+    parser.add_argument("--warmup", type=int, default=100,
                         help="Warmup iterations (default: 50)")
     parser.add_argument("--iterations", type=int, default=1000,
                         help="Timed iterations (default: 1000)")
@@ -781,53 +809,10 @@ def main():
         })
 
     # ------------------------------------------------------------------
-    # Stage 3 - GPU Utilization Monitoring  (separate pass)
+    # Stage 3 - Metric Calculation
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
-    print("  Stage 3: GPU Utilization Monitoring")
-    print("=" * 70)
-
-    for ed, res in zip(engine_data, engine_results):
-        name = ed["name"]
-        context = ed["context"]
-        io_buffers = ed["io_buffers"]
-        inp = ed["inp"]
-
-        print(f"\n[{name}] GPU monitoring pass ({args.iterations} iters, "
-              f"sampling every {args.gpu_sample_interval}s) ...",
-              end=" ", flush=True)
-
-        sampler = GPUUtilSampler(gpu_id=args.gpu_id,
-                                 interval=args.gpu_sample_interval)
-        with sampler:
-            for _ in range(args.iterations):
-                infer_one(context, inp, io_buffers)
-        print("done.")
-
-        n_samples = len(sampler.timestamps)
-        print(f"[{name}] Collected {n_samples} GPU samples.")
-
-        res["gpu_samples"] = {
-            "timestamps": sampler.timestamps,
-            "gpu_util_pct": sampler.gpu_util_pct,
-            "mem_util_pct": sampler.mem_util_pct,
-            "vram_used_mb": sampler.vram_used_mb,
-            "sm_clock_mhz": sampler.sm_clock_mhz,
-            "mem_clock_mhz": sampler.mem_clock_mhz,
-        }
-
-        if n_samples > 0:
-            avg_gpu = np.mean(sampler.gpu_util_pct)
-            avg_mem = np.mean(sampler.mem_util_pct)
-            avg_vram = np.mean(sampler.vram_used_mb)
-            print(f"[{name}] Avg GPU util={avg_gpu:.1f}%  "
-                  f"Mem util={avg_mem:.1f}%  VRAM={avg_vram:.0f} MB")
-
-    # ------------------------------------------------------------------
-    # Stage 4 - Metric Calculation
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 70)
-    print("  Stage 4: Metric Calculation")
+    print("  Stage 3: Metric Calculation")
     print("=" * 70)
 
     # -- Cross-engine comparison on the visualization image ---------------
@@ -860,7 +845,7 @@ def main():
                      for res in engine_results}
             n_evaluated = 0
 
-            for img_path in metric_image_paths:
+            for img_path in tqdm(metric_image_paths, desc="Evaluating metrics", unit="img"):
                 basename = os.path.splitext(os.path.basename(img_path))[0]
                 gt_path = os.path.join(args.metric_gt_dir, basename + ".npy")
                 if not os.path.isfile(gt_path):
@@ -924,6 +909,85 @@ def main():
                   f"SiLog={gt_m['silog']:.4f}  "
                   f"d1={gt_m['d1']*100:.1f}%  d2={gt_m['d2']*100:.1f}%  "
                   f"d3={gt_m['d3']*100:.1f}%")
+
+    # ------------------------------------------------------------------
+    # Cleanup - Unload all engines before GPU monitoring
+    # ------------------------------------------------------------------
+    print("\nFreeing pre-loaded engine resources before GPU monitoring...")
+    for ed in engine_data:
+        _free_io_buffers(ed["io_buffers"])
+        del ed["context"]
+        del ed["engine"]
+    del engine_data
+    gc.collect()
+
+    # ------------------------------------------------------------------
+    # Stage 4 - GPU Utilization Monitoring (independent load/unload)
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 70)
+    time.sleep(2)
+    print("  Stage 4: GPU Utilization Monitoring")
+    print("=" * 70)
+
+    for i, engine_path in enumerate(args.engines):
+        name = os.path.basename(engine_path)
+        res = engine_results[i]
+
+        print(f"\n[{name}] Loading engine for GPU monitoring...")
+        engine = load_engine(engine_path, trt_logger)
+        context = engine.create_execution_context()
+
+        # Detect input dtype
+        inputs, _ = get_io_tensors(engine)
+        _, in_dtype = inputs[0]
+        inp = preprocess_bgr_to_nchw(bgr, args.input_size, dtype=in_dtype)
+
+        # Allocate buffers
+        io_buffers = allocate_io(engine, context, tuple(inp.shape))
+
+        # Warmup
+        print(f"[{name}] Warmup ({args.warmup} iters) ...", end=" ",
+              flush=True)
+        for _ in range(args.warmup):
+            infer_one(context, inp, io_buffers)
+        print("done.")
+
+        # GPU monitoring pass
+        print(f"[{name}] GPU monitoring pass ({args.iterations} iters, "
+              f"sampling every {args.gpu_sample_interval}s) ...",
+              end=" ", flush=True)
+
+        sampler = GPUUtilSampler(gpu_id=args.gpu_id,
+                                 interval=args.gpu_sample_interval)
+        with sampler:
+            for _ in range(args.iterations):
+                infer_one(context, inp, io_buffers)
+        print("done.")
+
+        n_samples = len(sampler.timestamps)
+        print(f"[{name}] Collected {n_samples} GPU samples.")
+
+        res["gpu_samples"] = {
+            "timestamps": sampler.timestamps,
+            "gpu_util_pct": sampler.gpu_util_pct,
+            "mem_util_pct": sampler.mem_util_pct,
+            "vram_used_mb": sampler.vram_used_mb,
+            "sm_clock_mhz": sampler.sm_clock_mhz,
+            "mem_clock_mhz": sampler.mem_clock_mhz,
+        }
+
+        if n_samples > 0:
+            avg_gpu = np.mean(sampler.gpu_util_pct)
+            avg_mem = np.mean(sampler.mem_util_pct)
+            avg_vram = np.mean(sampler.vram_used_mb)
+            print(f"[{name}] Avg GPU util={avg_gpu:.1f}%  "
+                  f"Mem util={avg_mem:.1f}%  VRAM={avg_vram:.0f} MB")
+
+        # Free this engine's resources before loading the next one
+        _free_io_buffers(io_buffers)
+        del context
+        del engine
+        gc.collect()
 
     # ------------------------------------------------------------------
     # Stage 5 - Visualization
