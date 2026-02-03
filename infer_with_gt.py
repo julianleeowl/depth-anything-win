@@ -14,11 +14,12 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorrt as trt
+import torch
 
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, inverse_depth_to_depth
+from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, align_scale_shift, eval_depth_metrics
 
 
 def load_engine(engine_path: str, logger: trt.ILogger) -> trt.ICudaEngine:
@@ -181,8 +182,7 @@ def main():
     gt_raw = np.load(args.gt).astype(np.float32)
     if gt_raw.ndim == 3:
         gt_raw = gt_raw.squeeze()
-    gt_raw = cv2.resize(gt_raw, (w0, h0), interpolation=cv2.INTER_CUBIC)
-    gt_norm = normalize_depth(gt_raw)
+    # gt_raw = cv2.resize(gt_raw, (w0, h0), interpolation=cv2.INTER_CUBIC)
     print(f"GT shape: {gt_raw.shape}  range=[{gt_raw.min():.3f}, {gt_raw.max():.3f}]")
 
     trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -202,23 +202,28 @@ def main():
     print(f"Output shape: {out_arr.shape}  dtype={out_arr.dtype}")
 
     inv_depth_hw = squeeze_depth_to_hw(out_arr, out_name)
-    depth_hw = inverse_depth_to_depth(inv_depth_hw)
-    depth_resized = cv2.resize(depth_hw, (w0, h0), interpolation=cv2.INTER_CUBIC)
+
+    min_depth = 1e-5
+    max_depth = 1e5
+
+    depth_hw = 1.0 / inv_depth_hw
+    depth_resized = cv2.resize(depth_hw, (w0, h0), interpolation=cv2.INTER_LINEAR)
 
 
-    pred_norm = normalize_depth(depth_resized)
-    print(f"Depth range: [{depth_resized.min():.3f}, {depth_resized.max():.3f}]")
+    gt_mask = (gt_raw > min_depth) & (gt_raw < max_depth)
 
-    metrics = compute_gt_metrics(depth_resized, gt_raw)
+    gt_valid = gt_raw[gt_mask]
+    depth_valid = depth_resized[gt_mask]
 
-    print("\nMetrics:")
-    print(f"  AbsRel:  {metrics['abs_rel']:.6f}")
-    print(f"  SqRel:   {metrics['sq_rel']:.6f}")
-    print(f"  RMSE:    {metrics['rmse']:.6f}")
-    print(f"  d1:      {metrics['d1']:.2f}%")
-    print(f"  d2:      {metrics['d2']:.2f}%")
-    print(f"  d3:      {metrics['d3']:.2f}%")
+    align_depth_resized, s, t = align_scale_shift(depth_valid, gt_valid)
+    metrics = eval_depth_metrics(torch.tensor(align_depth_resized), torch.tensor(gt_valid))
 
+
+    for key, val in metrics.items():
+        print(f"  {key}: {val:.6f}")
+
+    gt_norm = normalize_depth(gt_raw)
+    pred_norm = normalize_depth(depth_resized * s + t)
     plot_comparison(rgb, pred_norm, gt_norm, metrics, args.output)
     print(f"\nSaved comparison plot: {args.output}")
 
