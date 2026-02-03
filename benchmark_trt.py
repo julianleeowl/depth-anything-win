@@ -26,7 +26,9 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, inverse_depth_to_depth
+import torch
+
+from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, depth_metric
 
 
 # =============================================================================
@@ -353,7 +355,9 @@ def plot_depth_comparison(rgb: np.ndarray, engine_results: list,
             avg_tag = f" (avg/{n_imgs})" if n_imgs else ""
             title_lines.append(
                 f"AbsRel={gt_m['abs_rel']:.4f}  "
-                f"\u03b4<1.25={gt_m['d1']:.1f}%{avg_tag}")
+                f"SiLog={gt_m.get('silog', float('nan')):.4f}")
+            title_lines.append(
+                f"\u03b4<1.25={gt_m['d1']*100:.1f}%{avg_tag}")
         cross_m = res.get("cross_metrics")
         if cross_m:
             title_lines.append(f"MAE vs ref={cross_m['mae']:.5f}")
@@ -479,10 +483,10 @@ def save_metrics_markdown(engine_results: list, output_path: str):
         subtitle = (f" (averaged over {n_imgs} images)" if n_imgs
                     else " (single image)")
         lines.append(f"## Ground Truth Depth Metrics{subtitle}\n")
-        lines.append("| Engine | AbsRel | SqRel | RMSE | d1 (%) "
-                     "| d2 (%) | d3 (%) |")
-        lines.append("|--------|--------|-------|------|--------"
-                     "|--------|--------|")
+        lines.append("| Engine | AbsRel | SqRel | RMSE | RMSE_log "
+                     "| log10 | SiLog | d1 (%) | d2 (%) | d3 (%) |")
+        lines.append("|--------|--------|-------|------|----------"
+                     "|-------|-------|--------|--------|--------|")
         for r in engine_results:
             m = r.get("gt_metrics")
             if m:
@@ -490,7 +494,11 @@ def save_metrics_markdown(engine_results: list, output_path: str):
                     f"| {r['name']} "
                     f"| {m['abs_rel']:.4f} | {m['sq_rel']:.4f} "
                     f"| {m['rmse']:.4f} "
-                    f"| {m['d1']:.1f} | {m['d2']:.1f} | {m['d3']:.1f} |"
+                    f"| {m.get('rmse_log', float('nan')):.4f} "
+                    f"| {m.get('log10', float('nan')):.4f} "
+                    f"| {m.get('silog', float('nan')):.4f} "
+                    f"| {m['d1']*100:.1f} | {m['d2']*100:.1f} "
+                    f"| {m['d3']*100:.1f} |"
                 )
         lines.append("")
 
@@ -562,16 +570,20 @@ def print_summary(engine_results: list):
         gt_label = (f"GT Depth Metrics (averaged over {n_imgs} images)"
                     if n_imgs else "GT Depth Metrics (single image)")
         print(f"\n  {gt_label}")
-        print(f"  {'Engine':<38} {'AbsRel':>8} {'SqRel':>8} {'RMSE':>8} "
+        print(f"  {'Engine':<30} {'AbsRel':>8} {'SqRel':>8} {'RMSE':>8} "
+              f"{'RMSElog':>8} {'log10':>8} {'SiLog':>8} "
               f"{'d1':>8} {'d2':>8} {'d3':>8}")
-        print("-" * 90)
+        print("-" * 120)
         for r in engine_results:
             m = r.get("gt_metrics")
             if m:
-                print(f"  {r['name']:<38} {m['abs_rel']:>8.4f} "
+                print(f"  {r['name']:<30} {m['abs_rel']:>8.4f} "
                       f"{m['sq_rel']:>8.4f} {m['rmse']:>8.4f} "
-                      f"{m['d1']:>7.1f}% {m['d2']:>7.1f}% "
-                      f"{m['d3']:>7.1f}%")
+                      f"{m.get('rmse_log', float('nan')):>8.4f} "
+                      f"{m.get('log10', float('nan')):>8.4f} "
+                      f"{m.get('silog', float('nan')):>8.4f} "
+                      f"{m['d1']*100:>7.1f}% {m['d2']*100:>7.1f}% "
+                      f"{m['d3']*100:>7.1f}%")
 
     # Cross-engine metrics
     if has_cross:
@@ -622,6 +634,10 @@ def main():
                              "(default: 0.1)")
     parser.add_argument("--gpu-id", type=int, default=0,
                         help="GPU device index for pynvml (default: 0)")
+    parser.add_argument("--min-depth", type=float, default=1e-5,
+                        help="Minimum valid depth for metrics (default: 1e-5)")
+    parser.add_argument("--max-depth", type=float, default=1e5,
+                        help="Maximum valid depth for metrics (default: 1e5)")
     parser.add_argument("--output-dir", type=str, default="benchmark_results",
                         help="Directory for output files (default: "
                              "benchmark_results/)")
@@ -667,8 +683,9 @@ def main():
         gt_raw = np.load(args.gt).astype(np.float32)
         if gt_raw.ndim == 3:
             gt_raw = gt_raw.squeeze()
-        gt_raw = cv2.resize(gt_raw, (w0, h0), interpolation=cv2.INTER_CUBIC)
-        gt_depth_norm = normalize_depth(gt_raw)
+        # Keep original GT resolution for depth_metric (it handles resizing)
+        gt_for_vis = cv2.resize(gt_raw, (w0, h0), interpolation=cv2.INTER_CUBIC)
+        gt_depth_norm = normalize_depth(gt_for_vis)
         print(f"Ground truth: {args.gt}  shape={gt_raw.shape}")
 
     trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -747,10 +764,10 @@ def main():
         print(f"[{name}] Mean={stats['mean']:.2f} ms  "
               f"P95={stats['p95']:.2f} ms  FPS={stats['fps']:.1f}")
 
-        # Extract depth output
+        # Extract depth output (raw inverse depth from model)
         out_name, out_arr = last_out[0]
-        depth_hw = squeeze_depth_to_hw(out_arr, out_name)
-        depth_resized = cv2.resize(depth_hw, (w0, h0),
+        inv_depth_hw = squeeze_depth_to_hw(out_arr, out_name)
+        depth_resized = cv2.resize(inv_depth_hw, (w0, h0),
                                    interpolation=cv2.INTER_CUBIC)
         depth_norm = normalize_depth(depth_resized)
 
@@ -758,6 +775,7 @@ def main():
             "name": name,
             "latencies": latencies,
             "speed_stats": stats,
+            "inv_depth_hw": inv_depth_hw,
             "depth_raw": depth_resized,
             "depth_norm": depth_norm,
         })
@@ -836,7 +854,8 @@ def main():
             print(f"GT directory: {args.metric_gt_dir}")
 
             # Accumulators: engine_name -> metric_key -> list of values
-            GT_METRIC_KEYS = ("abs_rel", "sq_rel", "rmse", "d1", "d2", "d3")
+            GT_METRIC_KEYS = ("abs_rel", "sq_rel", "rmse", "rmse_log",
+                              "log10", "silog", "d1", "d2", "d3")
             accum = {res["name"]: {k: [] for k in GT_METRIC_KEYS}
                      for res in engine_results}
             n_evaluated = 0
@@ -847,31 +866,28 @@ def main():
                 if not os.path.isfile(gt_path):
                     continue
 
-                # Load image and GT
+                # Load image and GT (keep GT at original resolution;
+                # depth_metric handles resizing the prediction to match)
                 img_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
                 if img_bgr is None:
                     continue
-                ih, iw = img_bgr.shape[:2]
 
                 img_gt = np.load(gt_path).astype(np.float32)
                 if img_gt.ndim == 3:
                     img_gt = img_gt.squeeze()
-                img_gt = cv2.resize(img_gt, (iw, ih),
-                                    interpolation=cv2.INTER_CUBIC)
 
                 # Run inference on each engine and compute metrics
+                # using depth_metric (same as infer_with_gt.py)
                 for ed, res in zip(engine_data, engine_results):
                     inp_m = preprocess_bgr_to_nchw(
                         img_bgr, args.input_size, dtype=ed["inp"].dtype)
                     out = infer_one(ed["context"], inp_m, ed["io_buffers"])
                     out_name, out_arr = out[0]
                     inv_depth_hw = squeeze_depth_to_hw(out_arr, out_name)
-                    inv_depth_resized = cv2.resize(inv_depth_hw, (iw, ih),
-                                               interpolation=cv2.INTER_CUBIC)
-                    depth_resized = inverse_depth_to_depth(inv_depth_resized)
-                    pred_norm = normalize_depth(depth_resized)
 
-                    gt_m = compute_gt_metrics(depth_resized, img_gt)
+                    gt_m, _, _ = depth_metric(
+                        inv_depth_hw, img_gt,
+                        args.min_depth, args.max_depth)
                     for k in GT_METRIC_KEYS:
                         if not np.isnan(gt_m[k]):
                             accum[res["name"]][k].append(gt_m[k])
@@ -890,18 +906,24 @@ def main():
                 print(f"[{res['name']}] GT (avg over {n_evaluated} imgs): "
                       f"AbsRel={avg['abs_rel']:.4f}  "
                       f"RMSE={avg['rmse']:.4f}  "
-                      f"d1={avg['d1']:.1f}%  d2={avg['d2']:.1f}%  "
-                      f"d3={avg['d3']:.1f}%")
+                      f"SiLog={avg['silog']:.4f}  "
+                      f"d1={avg['d1']*100:.1f}%  d2={avg['d2']*100:.1f}%  "
+                      f"d3={avg['d3']*100:.1f}%")
 
     elif gt_raw is not None:
-        # Single-image GT metric evaluation (original behavior)
+        # Single-image GT metric evaluation using depth_metric
+        # (same method as infer_with_gt.py: inv_depth -> depth, least-squares
+        # affine alignment, torch-based metrics)
         for res in engine_results:
-            gt_m = compute_gt_metrics(res["depth_raw"], gt_raw)
+            gt_m, _, _ = depth_metric(
+                res["inv_depth_hw"], gt_raw,
+                args.min_depth, args.max_depth)
             res["gt_metrics"] = gt_m
             print(f"[{res['name']}] GT: AbsRel={gt_m['abs_rel']:.4f}  "
                   f"RMSE={gt_m['rmse']:.4f}  "
-                  f"d1={gt_m['d1']:.1f}%  d2={gt_m['d2']:.1f}%  "
-                  f"d3={gt_m['d3']:.1f}%")
+                  f"SiLog={gt_m['silog']:.4f}  "
+                  f"d1={gt_m['d1']*100:.1f}%  d2={gt_m['d2']*100:.1f}%  "
+                  f"d3={gt_m['d3']*100:.1f}%")
 
     # ------------------------------------------------------------------
     # Stage 5 - Visualization
