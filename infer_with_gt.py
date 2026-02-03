@@ -18,25 +18,7 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-
-def preprocess_bgr_to_nchw(bgr: np.ndarray, input_size: int,
-                            dtype=np.float16) -> np.ndarray:
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    rgb = cv2.resize(rgb, (input_size, input_size), interpolation=cv2.INTER_CUBIC)
-    rgb = (rgb - IMAGENET_MEAN) / IMAGENET_STD
-    chw = np.transpose(rgb, (2, 0, 1))
-    nchw = np.expand_dims(chw, axis=0)
-    return np.ascontiguousarray(nchw.astype(dtype))
-
-
-def normalize_depth(depth_map: np.ndarray) -> np.ndarray:
-    d_min = depth_map.min()
-    d_max = depth_map.max()
-    return (depth_map - d_min) / (d_max - d_min + 1e-8)
+from bench import IMAGENET_MEAN, IMAGENET_STD, preprocess_bgr_to_nchw, normalize_depth, compute_gt_metrics, inverse_depth_to_depth
 
 
 def load_engine(engine_path: str, logger: trt.ILogger) -> trt.ICudaEngine:
@@ -132,46 +114,6 @@ def squeeze_depth_to_hw(out: np.ndarray, name: str) -> np.ndarray:
     return depth2d.astype(np.float32)
 
 
-def inverse_depth_to_depth(inv_depth: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    depth = 1.0 / (inv_depth + eps)
-    return depth
-
-
-def compute_gt_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
-    valid = gt > 1e-8
-    pred_v = pred[valid].astype(np.float64)
-    gt_v = gt[valid].astype(np.float64)
-
-    if len(pred_v) == 0:
-        return {k: float("nan")
-                for k in ("abs_rel", "sq_rel", "rmse", "d1", "d2", "d3")}
-
-    scale = np.median(gt_v) / (np.median(pred_v) + 1e-8)
-    pred_v = pred_v * scale
-
-    pred_v = np.clip(pred_v, 1e-8, None)
-    gt_v = np.clip(gt_v, 1e-8, None)
-
-    thresh = np.maximum(pred_v / gt_v, gt_v / pred_v)
-    d1 = float(np.mean(thresh < 1.25) * 100.0)
-    d2 = float(np.mean(thresh < 1.25 ** 2) * 100.0)
-    d3 = float(np.mean(thresh < 1.25 ** 3) * 100.0)
-
-    diff = pred_v - gt_v
-    abs_rel = float(np.mean(np.abs(diff) / gt_v))
-    sq_rel = float(np.mean(diff ** 2 / gt_v))
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-
-    return {
-        "abs_rel": abs_rel,
-        "sq_rel": sq_rel,
-        "rmse": rmse,
-        "d1": d1,
-        "d2": d2,
-        "d3": d3,
-    }
-
-
 def plot_comparison(rgb: np.ndarray, pred_norm: np.ndarray, gt_norm: np.ndarray,
                    metrics: dict, output_path: str):
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -260,10 +202,11 @@ def main():
     print(f"Output shape: {out_arr.shape}  dtype={out_arr.dtype}")
 
     inv_depth_hw = squeeze_depth_to_hw(out_arr, out_name)
-    inv_depth_resized = cv2.resize(inv_depth_hw, (w0, h0), interpolation=cv2.INTER_CUBIC)
-    depth_resized = inverse_depth_to_depth(inv_depth_resized)
+    depth_hw = inverse_depth_to_depth(inv_depth_hw)
+    depth_resized = cv2.resize(depth_hw, (w0, h0), interpolation=cv2.INTER_CUBIC)
+
+
     pred_norm = normalize_depth(depth_resized)
-    print(f"Inverse depth range: [{inv_depth_resized.min():.6f}, {inv_depth_resized.max():.6f}]")
     print(f"Depth range: [{depth_resized.min():.3f}, {depth_resized.max():.3f}]")
 
     metrics = compute_gt_metrics(depth_resized, gt_raw)
