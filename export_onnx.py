@@ -95,10 +95,10 @@ def main():
                                         dtype=dtype).to(device)
 
                 for opset in args.opset_version:
-                    output_dir = checkpoint_p.parent / f"{stem}-{input_size}"
+                    output_dir = checkpoint_p.parent / f"{input_size}"
                     output_dir.mkdir(parents=True, exist_ok=True)
 
-                    onnx_filename = f"{stem}_{input_size}_{precision}_op{opset}.onnx"
+                    onnx_filename = f"{stem}-{input_size}-{precision}-op{opset}.onnx"
                     onnx_path = output_dir / onnx_filename
 
                     torch.onnx.export(
