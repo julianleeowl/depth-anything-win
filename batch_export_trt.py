@@ -17,6 +17,7 @@ Examples:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 from itertools import product
@@ -24,6 +25,15 @@ from pathlib import Path
 from tqdm import tqdm
 
 ALL_CALIBRATORS = ["entropy2", "entropy", "minmax"]
+
+
+def get_gpu_id() -> str:
+    """Return digits-only GPU identifier, e.g. '4090'."""
+    out = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        text=True,
+    )
+    return re.sub(r"\D", "", out.strip().splitlines()[0])
 
 
 def find_onnx_files(input_dir: Path) -> list[Path]:
@@ -108,7 +118,9 @@ def main():
             pbar.update(1)
 
         # --- INT8 ---
-        for onnx_path, opt_level, calibrator in product(onnx_files, args.opt_levels, args.calibrators):
+        gpu_id = get_gpu_id()
+        for onnx_path, calibrator, opt_level in product(onnx_files, args.calibrators, args.opt_levels):
+            cache_path = onnx_path.parent / f"{onnx_path.stem}-{gpu_id}-int8-{calibrator}.calib.cache"
             label = f"INT8 | {onnx_path.name} | lv{opt_level} | {calibrator}"
             pbar.set_description(f"Exporting {label}")
             cmd = [
@@ -120,6 +132,7 @@ def main():
                 "--batch", str(args.batch),
                 "--calib-batches", str(args.calib_batches),
                 "--calibrator", calibrator,
+                "--calib-cache", str(cache_path),
             ]
             ok = run_cmd(cmd, dry_run=args.dry_run)
             results.append((label, ok))
