@@ -75,6 +75,10 @@ def main():
     parser.add_argument("--calib-batches", type=int, default=0,
                         help="Number of calibration batches (default: 0 = all images)")
 
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print all TRT builder logs to console (forwarded to export_trt_int8.py)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip builds when engine file already exists")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing")
 
@@ -113,6 +117,8 @@ def main():
                 "--optimization-level", str(opt_level),
                 "--workspace", str(args.workspace),
             ]
+            if args.skip_existing:
+                cmd.append("--skip-existing")
             ok = run_cmd(cmd, dry_run=args.dry_run)
             results.append((label, ok))
             pbar.update(1)
@@ -134,6 +140,10 @@ def main():
                 "--calibrator", calibrator,
                 "--calib-cache", str(cache_path),
             ]
+            if args.verbose:
+                cmd.append("--verbose")
+            if args.skip_existing:
+                cmd.append("--skip-existing")
             ok = run_cmd(cmd, dry_run=args.dry_run)
             results.append((label, ok))
             pbar.update(1)

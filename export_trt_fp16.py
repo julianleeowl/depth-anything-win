@@ -121,7 +121,7 @@ def generate_svg(graph_json_path: str, profile_json_path: str):
 
 
 def process_onnx(onnx_path: str, gpu_name: str, workspace_gb: float,
-                 optimization_level: int):
+                 optimization_level: int, skip_existing: bool = False):
     """Process a single ONNX file: build, profile, draw."""
     onnx_basename = os.path.splitext(os.path.basename(onnx_path))[0].replace("_", "-")
     onnx_dir = os.path.dirname(os.path.abspath(onnx_path))
@@ -131,6 +131,11 @@ def process_onnx(onnx_path: str, gpu_name: str, workspace_gb: float,
 
     prefix = os.path.join(out_dir, f"{onnx_basename}-{gpu_name}-fp16-lv{optimization_level}")
     engine_path = f"{prefix}.engine"
+
+    if skip_existing and os.path.isfile(engine_path):
+        print(f"[SKIP] Engine already exists: {engine_path}")
+        return True
+
     graph_json_path = f"{prefix}.engine.graph.json"
     profile_json_path = f"{prefix}.engine.profile.json"
     timing_json_path = f"{prefix}.engine.timing.json"
@@ -172,6 +177,8 @@ def main():
                         help="Workspace size in GB (default: 8.0)")
     parser.add_argument("--optimization-level", type=int, default=3,
                         help="Builder optimization level 0-5 (default: 3)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip build if engine file already exists")
     args = parser.parse_args()
 
     gpu_name = get_gpu_name()
@@ -184,7 +191,8 @@ def main():
             results[onnx_path] = False
             continue
         results[onnx_path] = process_onnx(
-            onnx_path, gpu_name, args.workspace, args.optimization_level)
+            onnx_path, gpu_name, args.workspace, args.optimization_level,
+            skip_existing=args.skip_existing)
 
     # Summary for multiple files
     if len(args.onnx) > 1:

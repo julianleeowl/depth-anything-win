@@ -40,9 +40,10 @@ def get_gpu_id() -> str:
     return re.sub(r"\D", "", name)
 
 
-def run_trtexec(cmd: list, log_path: str) -> bool:
+def run_trtexec(cmd: list, log_path: str, verbose: bool = False) -> bool:
     """Run a trtexec command, saving stdout to log_path. Returns success."""
-    print(f"  $ {' '.join(cmd)}")
+    if verbose:
+        print(f"  $ {' '.join(cmd)}")
     try:
         result = subprocess.run(
             cmd,
@@ -66,7 +67,7 @@ def run_trtexec(cmd: list, log_path: str) -> bool:
 
 def profile_engine(engine_path: str, graph_json_path: str,
                    profile_json_path: str, timing_json_path: str,
-                   profile_log_path: str) -> bool:
+                   profile_log_path: str, verbose: bool = False) -> bool:
     """Profile engine via trtexec."""
     cmd = [
         "trtexec",
@@ -82,7 +83,7 @@ def profile_engine(engine_path: str, graph_json_path: str,
         "--profilingVerbosity=detailed",
     ]
     print("\n[Profile] Profiling engine...")
-    return run_trtexec(cmd, profile_log_path)
+    return run_trtexec(cmd, profile_log_path, verbose=verbose)
 
 
 def generate_svg(graph_json_path: str, profile_json_path: str):
@@ -239,6 +240,7 @@ def build_engine(
     opt_level: int,
     calib_dir: Path,
     build_log_path: Optional[Path] = None,
+    verbose: bool = False,
 ):
     log_lines = []
 
@@ -253,7 +255,12 @@ def build_engine(
             }.get(severity, "UNKNOWN")
             line = f"[TRT] [{tag}] {msg}"
             log_lines.append(line)
-            print(line)
+            if verbose or severity in (
+                trt.ILogger.INTERNAL_ERROR,
+                trt.ILogger.ERROR,
+                trt.ILogger.WARNING,
+            ):
+                print(line)
 
     logger = _Logger()
     trt.init_libnvinfer_plugins(logger, "")
@@ -331,6 +338,10 @@ if __name__ == "__main__":
                     help="Builder optimization level 0-5 (default: 3)")
     ap.add_argument("--workspace-gb", type=float, default=8.0)
     ap.add_argument("--calib-cache", type=str, default="", help="Path to calibration cache file")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Print all TRT builder logs to console (default: quiet, logs still saved to file)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="Skip build if engine file already exists")
 
     args = ap.parse_args()
 
@@ -349,6 +360,10 @@ if __name__ == "__main__":
         engine_path = Path(args.engine)
     else:
         engine_path = out_dir / f"{prefix}.engine"
+
+    if args.skip_existing and engine_path.exists():
+        print(f"[SKIP] Engine already exists: {engine_path}")
+        sys.exit(0)
 
     graph_json_path = str(out_dir / f"{prefix}.engine.graph.json")
     profile_json_path = str(out_dir / f"{prefix}.engine.profile.json")
@@ -381,12 +396,13 @@ if __name__ == "__main__":
         opt_level=args.opt_level,
         calib_dir=Path(args.calib_dir),
         build_log_path=build_log_path,
+        verbose=args.verbose,
     )
 
     # Profile
     if not profile_engine(str(engine_path), graph_json_path,
                           profile_json_path, timing_json_path,
-                          profile_log_path):
+                          profile_log_path, verbose=args.verbose):
         print(f"\nProfiling failed. Skipping SVG generation.")
         sys.exit(1)
 
