@@ -338,12 +338,12 @@ if __name__ == "__main__":
     gpu_id = get_gpu_id()
     onnx_basename = onnx_path.stem.replace("_", "-")
 
-    # Create output folder next to the ONNX file: {basename}-{gpu}/
-    out_dir = onnx_path.parent / f"{onnx_basename}-{gpu_id}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # Artifact prefix
     prefix = f"{onnx_basename}-{gpu_id}-int8-{args.calibrator}-lv{args.opt_level}"
+
+    # Create output folder next to the ONNX file, named after the engine basename
+    out_dir = onnx_path.parent / prefix
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.engine:
         engine_path = Path(args.engine)

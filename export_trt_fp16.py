@@ -125,7 +125,8 @@ def process_onnx(onnx_path: str, gpu_name: str, workspace_gb: float,
     """Process a single ONNX file: build, profile, draw."""
     onnx_basename = os.path.splitext(os.path.basename(onnx_path))[0].replace("_", "-")
     onnx_dir = os.path.dirname(os.path.abspath(onnx_path))
-    out_dir = os.path.join(onnx_dir, f"{onnx_basename}-{gpu_name}")
+    prefix = f"{onnx_basename}-{gpu_name}-fp16-lv{optimization_level}"
+    out_dir = os.path.join(onnx_dir, prefix)
     os.makedirs(out_dir, exist_ok=True)
 
     prefix = os.path.join(out_dir, f"{onnx_basename}-{gpu_name}-fp16-lv{optimization_level}")
