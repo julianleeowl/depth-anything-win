@@ -8,13 +8,13 @@ and optionally SVG) into an auto-named output folder.
 
 Usage:
     # Single ONNX file
-    python export_trt.py model.onnx
+    python export_trt_fp16.py model.onnx
 
     # Multiple ONNX files
-    python export_trt.py a.onnx b.onnx
+    python export_trt_fp16.py a.onnx b.onnx
 
     # Custom optimization level and workspace
-    python export_trt.py model.onnx --optimization-level 5 --workspace 12
+    python export_trt_fp16.py model.onnx --optimization-level 5 --workspace 12
 """
 
 import argparse
@@ -128,7 +128,7 @@ def process_onnx(onnx_path: str, gpu_name: str, workspace_gb: float,
     out_dir = os.path.join(onnx_dir, f"{onnx_basename}-{gpu_name}")
     os.makedirs(out_dir, exist_ok=True)
 
-    prefix = os.path.join(out_dir, f"{onnx_basename}-{gpu_name}-lv{optimization_level}")
+    prefix = os.path.join(out_dir, f"{onnx_basename}-{gpu_name}-fp16-lv{optimization_level}")
     engine_path = f"{prefix}.engine"
     graph_json_path = f"{prefix}.engine.graph.json"
     profile_json_path = f"{prefix}.engine.profile.json"
